@@ -2,6 +2,7 @@ import { assert } from '@0x/assert';
 import { orderParsingUtils } from '@0x/order-utils';
 import { ObjectMap, SignedOrder } from '@0x/types';
 import { BigNumber } from '@0x/utils';
+import isNode = require('detect-node');
 import { v4 as uuid } from 'uuid';
 import * as WebSocket from 'websocket';
 
@@ -41,7 +42,7 @@ const DEFAULT_WS_OPTS: WSOpts = {
 export class WSClient {
     private readonly _subscriptionIdToMeshSpecificId: ObjectMap<string>;
     private _heartbeatCheckIntervalId: number | undefined;
-    private _genericWsClient: GenericWSClient;
+    private readonly _genericWsClient: GenericWSClient;
     private static _convertRawAcceptedOrders(rawAcceptedOrders: RawAcceptedOrderInfo[]): AcceptedOrderInfo[] {
         const acceptedOrderInfos: AcceptedOrderInfo[] = [];
         rawAcceptedOrders.forEach(rawAcceptedOrderInfo => {
@@ -54,6 +55,29 @@ export class WSClient {
         });
         return acceptedOrderInfos;
     }
+    private static _instantiateGenericWSClient(url: string, wsOpts: WSOpts | undefined): GenericWSClient {
+        const opts = wsOpts !== undefined ? wsOpts : DEFAULT_WS_OPTS;
+        if (opts !== undefined && opts.reconnectAfter === undefined) {
+            opts.reconnectAfter = DEFAULT_RECONNECT_AFTER_MS;
+        }
+        let connection: any;
+        // If running in Node.js environment
+        if (isNode) {
+            const headers: any = opts.headers || {};
+            connection = new (WebSocket.w3cwebsocket as any)(
+                url,
+                opts.protocol,
+                null,
+                headers,
+                null,
+                opts.clientConfig,
+            );
+        } else {
+            connection = new (window as any).WebSocket(url, opts.protocol);
+        }
+        const genericWSClient = new GenericWSClient(connection, opts.reconnectAfter, opts.timeout);
+        return genericWSClient;
+    }
     /**
      * Instantiates a new WSClient instance
      * @param   url               WS server endpoint
@@ -61,26 +85,7 @@ export class WSClient {
      * @return  An instance of WSClient
      */
     constructor(url: string, wsOpts?: WSOpts) {
-        if (wsOpts !== undefined && wsOpts.reconnectAfter === undefined) {
-            wsOpts.reconnectAfter = DEFAULT_RECONNECT_AFTER_MS;
-        }
-        const finalWSOpts = wsOpts !== undefined ? wsOpts : DEFAULT_WS_OPTS;
-        let connection: any;
-        // If running in Node.js environment
-        if (typeof process !== 'undefined' && process.versions != null && process.versions.node != null) {
-            const headers: any = finalWSOpts.headers || {};
-            connection = new (WebSocket.w3cwebsocket as any)(
-                url,
-                finalWSOpts.protocol,
-                null,
-                headers,
-                null,
-                finalWSOpts.clientConfig,
-            );
-        } else {
-            connection = new (window as any).WebSocket(url, finalWSOpts.protocol);
-        }
-        this._genericWsClient = new GenericWSClient(connection, finalWSOpts.reconnectAfter, finalWSOpts.timeout);
+        this._genericWsClient = WSClient._instantiateGenericWSClient(url, wsOpts);
         this._subscriptionIdToMeshSpecificId = {};
         // Intentional fire-and-forget
         // tslint:disable-next-line:no-floating-promises
@@ -212,6 +217,7 @@ export class WSClient {
         // we try to send a payload on a connection _we know_ is closed. We therefore need to call `disconnect`
         // after a timeout so that we are sure we've already attempted to send the unsubscription payloads before
         // we forcefully close the connection
+        // tslint:disable-next-line:no-floating-promises
         this._genericWsClient.clearSubscriptionsAsync('mesh_unsubscribe');
         await new Promise<NodeJS.Timer>(resolve => setTimeout(resolve, CLEAR_SUBSCRIPTIONS_GRACE_PERIOD_MS));
         this._genericWsClient.disconnect(WebSocket.connection.CLOSE_REASON_NORMAL, 'Normal connection closure');
